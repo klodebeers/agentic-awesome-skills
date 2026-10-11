@@ -4,6 +4,7 @@ import { fireEvent, screen, waitFor } from '@testing-library/react';
 import { renderWithRouter } from '../../utils/testUtils';
 import { Workbench } from '../Workbench';
 import { canonicalWorkbenchJson } from '../../utils/workbenchReview';
+import { selectionFixture } from '../../utils/__tests__/selectionEvidenceFixture';
 
 const D1 = `sha256-${'1'.repeat(64)}`;
 const D2 = `sha256-${'2'.repeat(64)}`;
@@ -76,18 +77,68 @@ function planFixture(reasonCode = 'AAS_MANAGED_DRIFT_APPROVED'): Record<string, 
   return plan;
 }
 
+async function boundPlanFixture(): Promise<Record<string, unknown>> {
+  const stack = stackFixture();
+  const manifestDigest = `sha256-${createHash('sha256').update(canonicalWorkbenchJson(stack)).digest('hex')}`;
+  const plan = planFixture() as { digest: string; payload: Record<string, unknown> };
+  plan.payload.manifestDigest = manifestDigest;
+  plan.payload.desiredSkills = ['react-best-practices', 'playwright-skill'];
+  plan.digest = `sha256-${createHash('sha256').update(canonicalWorkbenchJson(plan.payload)).digest('hex')}`;
+  return plan;
+}
+
 function paste(label: 'Paste JSON', value: unknown, index = 0): void {
   const inputs = screen.getAllByLabelText(label);
   fireEvent.change(inputs[index], { target: { value: JSON.stringify(value) } });
 }
 
 describe('Workbench review UI', () => {
+  it('loads the public recorded manifest and real CLI plan through the same import checks', async () => {
+    renderWithRouter(<Workbench />, { useProvider: false });
+    fireEvent.click(screen.getByRole('button', { name: 'Load recorded example' }));
+    expect(screen.getByRole('status')).toHaveTextContent('Checking example artifacts');
+    await screen.findByRole('heading', { name: 'AAS MCP contract review' });
+    await screen.findByText('All bindings match');
+    expect(screen.getByRole('heading', { name: 'Single-target change review' })).toBeInTheDocument();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+  it('reviews evidence in memory and replaces stale consistency results when the manifest changes', async () => {
+    const { stack, evidence } = selectionFixture();
+    const fetchSpy = vi.mocked(globalThis.fetch);
+    renderWithRouter(<Workbench />, { useProvider: false });
+    paste('Paste JSON', stack, 0);
+    fireEvent.click(screen.getByRole('button', { name: 'Review pasted stack' }));
+    paste('Paste JSON', evidence, 2);
+    fireEvent.click(screen.getByRole('button', { name: 'Review pasted evidence' }));
+    expect(await screen.findByRole('heading', { name: 'Selection evidence' })).toBeInTheDocument();
+    await screen.findByText('All bindings match');
+    expect(screen.getAllByText('Match')).toHaveLength(3);
+    expect(screen.getByText(/do not authenticate its author/)).toBeInTheDocument();
+    paste('Paste JSON', { ...stack, name: 'a different stack' }, 0);
+    fireEvent.click(screen.getByRole('button', { name: 'Review pasted stack' }));
+    expect(screen.queryByText('All bindings match')).not.toBeInTheDocument();
+    await screen.findByText('Bindings need attention');
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects changed evidence bytes before displaying its claims', async () => {
+    const { evidence } = selectionFixture();
+    evidence.payload.project.files[0].path = 'tampered.ts';
+    renderWithRouter(<Workbench />, { useProvider: false });
+    paste('Paste JSON', evidence, 2);
+    fireEvent.click(screen.getByRole('button', { name: 'Review pasted evidence' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Evidence digest does not match');
+    expect(screen.queryByRole('heading', { name: 'Selection evidence' })).not.toBeInTheDocument();
+  });
   beforeEach(() => vi.clearAllMocks());
 
-  it('reviews a valid stack without offering install, apply, or share actions', () => {
+  it('reviews a valid stack with text-only installation preparation and no execution actions', () => {
     renderWithRouter(<Workbench />, { route: '/workbench', path: '/workbench', useProvider: false });
 
     expect(screen.getByRole('heading', { level: 1, name: 'Review what your agent selected.' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Need a stack to review?' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Compare skills in the catalog' })).toHaveAttribute('href', '/core');
+    expect(screen.getByRole('link', { name: 'Configuration and preview commands' })).toHaveAttribute('href', '/docs/aas-core/');
 
     paste('Paste JSON', stackFixture());
     fireEvent.click(screen.getByRole('button', { name: 'Review pasted stack' }));
@@ -96,7 +147,7 @@ describe('Workbench review UI', () => {
     expect(screen.getByText('react-best-practices')).toBeInTheDocument();
     expect(screen.getByText('playwright-skill')).toBeInTheDocument();
     expect(screen.getByText('Declared identity only.', { exact: false })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /install|apply|share/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^(install|apply|share)( |$)/i })).not.toBeInTheDocument();
     expect(window.location.search).toBe('');
   });
 
@@ -112,6 +163,34 @@ describe('Workbench review UI', () => {
     expect(screen.getAllByText('AAS_MANAGED_DRIFT_APPROVED', { exact: false })).toHaveLength(2);
     expect(screen.getByText('1 overrides')).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 3, name: 'Bound project profile' })).toBeInTheDocument();
+  });
+
+  it('shows a paired consistency gate after a bound stack and plan are both loaded', async () => {
+    renderWithRouter(<Workbench />, { route: '/workbench', path: '/workbench', useProvider: false });
+    paste('Paste JSON', stackFixture());
+    fireEvent.click(screen.getByRole('button', { name: 'Review pasted stack' }));
+    paste('Paste JSON', await boundPlanFixture(), 1);
+    fireEvent.click(screen.getByRole('button', { name: 'Review pasted plan' }));
+
+    expect(await screen.findByText('All bindings match')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: 'Artifact consistency' })).toBeInTheDocument();
+    for (const label of ['Manifest digest', 'Catalog identity', 'Selected skills', 'Plan target', 'Project profile']) {
+      expect(screen.getAllByText(label).length).toBeGreaterThan(0);
+    }
+    expect(screen.getAllByText('Match')).toHaveLength(5);
+  });
+
+  it('surfaces a selected-skill mismatch without hiding either valid artifact', async () => {
+    renderWithRouter(<Workbench />, { route: '/workbench', path: '/workbench', useProvider: false });
+    paste('Paste JSON', stackFixture());
+    fireEvent.click(screen.getByRole('button', { name: 'Review pasted stack' }));
+    paste('Paste JSON', planFixture(), 1);
+    fireEvent.click(screen.getByRole('button', { name: 'Review pasted plan' }));
+
+    expect(await screen.findByText('Bindings need attention')).toBeInTheDocument();
+    expect(screen.getAllByText('Mismatch').length).toBeGreaterThan(0);
+    expect(screen.getByRole('heading', { level: 2, name: 'reviewed-web-stack' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2, name: 'Single-target change review' })).toBeInTheDocument();
   });
 
   it('fails closed on schema drift and clears the previous review', () => {
@@ -194,4 +273,18 @@ describe('Workbench review UI', () => {
     expect(screen.queryByText('reviewed-web-stack')).not.toBeInTheDocument();
     expect(screen.getByText('No artifact loaded')).toBeInTheDocument();
   });
+});
+
+it('hides installation preparation when imported artifacts disagree or fail validation', async () => {
+  renderWithRouter(<Workbench />, { useProvider: false });
+  paste('Paste JSON', stackFixture());
+  fireEvent.click(screen.getByRole('button', { name: 'Review pasted stack' }));
+  expect(screen.getByText('Prepare installation preview')).toBeInTheDocument();
+  paste('Paste JSON', planFixture(), 1);
+  fireEvent.click(screen.getByRole('button', { name: 'Review pasted plan' }));
+  await screen.findByText('Bindings need attention');
+  expect(screen.queryByText('Prepare installation preview')).not.toBeInTheDocument();
+  paste('Paste JSON', { invalid: true }, 1);
+  fireEvent.click(screen.getByRole('button', { name: 'Review pasted plan' }));
+  expect(screen.queryByText('Prepare installation preview')).not.toBeInTheDocument();
 });

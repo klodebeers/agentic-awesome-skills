@@ -5,6 +5,7 @@ import path from 'node:path';
 import {
   assertManifest,
   assertIndexDiscoveryMeta,
+  assertCoreCatalogDiscoveryMeta,
   assertStaticIndexShell,
   assertWebmasterVerificationMeta,
   assertPluginsDiscoveryMeta,
@@ -97,7 +98,7 @@ function currentIdentityJsonLd(routeUrl) {
       sameAs: 'https://github.com/sickn33/agentic-awesome-skills',
       potentialAction: {
         '@type': 'SearchAction',
-        target: `${FIXTURE_ROOT_URL.replace(/\/$/, '')}/?q={search_term_string}`,
+        target: `${FIXTURE_ROOT_URL.replace(/\/$/, '')}/core/?q={search_term_string}`,
       },
     }, sourceCode);
   } else if (relativeRoute === 'plugins/') {
@@ -134,6 +135,8 @@ describe('seo assets verification helpers', () => {
       <urlset>
         <url><loc>https://owner.github.io/repo/</loc></url>
         <url><loc>https://owner.github.io/repo/plugins/</loc></url>
+        <url><loc>https://owner.github.io/repo/docs/</loc></url>
+        <url><loc>https://owner.github.io/repo/docs/getting-started/</loc></url>
         <url><loc>https://owner.github.io/repo/topics/antigravity-cli-skills/</loc></url>
         <url><loc>https://owner.github.io/repo/skill/agent-a/</loc></url>
         <url><loc>https://owner.github.io/repo/skill/agent-b/</loc></url>
@@ -169,6 +172,36 @@ describe('seo assets verification helpers', () => {
 
     expect(report.rootUrl).toBe(FIXTURE_ROOT_URL);
     expect(() => assertPrerenderedRouteIdentities(routes, distDir, '/repo', report.rootUrl)).not.toThrow();
+  });
+
+  it('accepts informational routes declared in informationPages.json', () => {
+    const xml = `
+      <urlset>
+        <url><loc>${FIXTURE_ROOT_URL}</loc></url>
+        <url><loc>${FIXTURE_ROOT_URL}teams/</loc></url>
+        <url><loc>${FIXTURE_ROOT_URL}trust/</loc></url>
+        <url><loc>${FIXTURE_ROOT_URL}skill/agent-a/</loc></url>
+      </urlset>
+    `;
+
+    expect(() => analyzeSitemap(xml, { minSkillUrls: 1 })).not.toThrow();
+  });
+
+  it('keeps the redirected Core overview out of the sitemap', () => {
+    const xml = `<urlset><url><loc>${FIXTURE_ROOT_URL}</loc></url><url><loc>${FIXTURE_ROOT_URL}aas-core/</loc></url><url><loc>${FIXTURE_ROOT_URL}skill/agent-a/</loc></url></urlset>`;
+    expect(() => analyzeSitemap(xml, { minSkillUrls: 1 })).toThrow('unsupported non-skill routes');
+  });
+
+  it('rejects undeclared non-skill routes outside the information page allowlist', () => {
+    const xml = `
+      <urlset>
+        <url><loc>${FIXTURE_ROOT_URL}</loc></url>
+        <url><loc>${FIXTURE_ROOT_URL}undeclared-page/</loc></url>
+        <url><loc>${FIXTURE_ROOT_URL}skill/agent-a/</loc></url>
+      </urlset>
+    `;
+
+    expect(() => analyzeSitemap(xml, { minSkillUrls: 1 })).toThrow('unsupported non-skill routes');
   });
 
   it('throws when sitemap has duplicated URLs', () => {
@@ -386,7 +419,7 @@ describe('seo assets verification helpers', () => {
     });
     writeRouteIdentityFixture(distDir, routeUrl, buildRouteIdentityHtml({ routeUrl, jsonLd: missingPackage }));
     expect(() => assertPrerenderedRouteIdentities([routeUrl], distDir, '/repo', FIXTURE_ROOT_URL)).toThrow(
-      'exactly the current social, npm package, and catalog identities',
+      'SoftwareSourceCode JSON-LD sameAs must contain exactly the current route, catalog root, and npm package identities',
     );
   });
 
@@ -632,6 +665,22 @@ describe('seo assets verification helpers', () => {
     expect(() => assertPrerenderedRouteIdentities(routes, distDir, '/repo', FIXTURE_ROOT_URL)).not.toThrow();
   });
 
+  it('requires the exact guide social card and rejects a stale default or another guide image', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'seo-docs-social-'));
+    const distDir = path.join(tmpDir, 'dist');
+    const routeUrl = `${FIXTURE_ROOT_URL}docs/getting-started/`;
+    try {
+      for (const image of [FIXTURE_SOCIAL_IMAGE_URL, `${FIXTURE_ROOT_URL}social/docs/faq.png`, `${FIXTURE_ROOT_URL}social/docs/getting-started.png`]) {
+        writeRouteIdentityFixture(distDir, routeUrl, buildRouteIdentityHtml({ routeUrl, socialImageUrl: image, jsonLd: currentIdentityJsonLd(routeUrl) }));
+        const verify = () => assertPrerenderedRouteIdentities([routeUrl], distDir, '/repo', FIXTURE_ROOT_URL);
+        if (image.endsWith('/getting-started.png')) expect(verify).not.toThrow();
+        else expect(verify).toThrow('og:image');
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('requires llms.txt discovery signals', () => {
     const llms = `
       # Agentic Awesome Skills
@@ -640,7 +689,7 @@ describe('seo assets verification helpers', () => {
       The published package predates AAS Core.
       1,678+ agentic skills with specialized plugins for Claude Code and Codex CLI.
       https://github.com/sickn33/agentic-awesome-skills
-      https://sickn33.github.io/agentic-awesome-skills/workbench
+      https://aaskills.tech/workbench
       Canonical source of truth: the GitHub repository is the primary project URL.
     `;
 
@@ -655,7 +704,7 @@ describe('seo assets verification helpers', () => {
       The published package predates AAS Core.
       1,678+ agentic skills with specialized plugins for Claude Code and Codex CLI.
       https://github.com/sickn33/agentic-awesome-skills
-      https://sickn33.github.io/agentic-awesome-skills/workbench
+      https://aaskills.tech/workbench
       Canonical source of truth: the GitHub repository is the primary project URL.
     `;
 
@@ -670,7 +719,7 @@ describe('seo assets verification helpers', () => {
       This release includes AAS Core.
       1,678+ agentic skills with specialized plugins for Claude Code and Codex CLI.
       https://github.com/sickn33/agentic-awesome-skills
-      https://sickn33.github.io/agentic-awesome-skills/workbench
+      https://aaskills.tech/workbench
       Canonical source of truth: the GitHub repository is the primary project URL.
     `;
 
@@ -691,7 +740,7 @@ describe('seo assets verification helpers', () => {
       This release includes AAS Core.
       1,678+ agentic skills with specialized plugins for Claude Code and Codex CLI.
       https://github.com/sickn33/agentic-awesome-skills
-      https://sickn33.github.io/agentic-awesome-skills/workbench
+      https://aaskills.tech/workbench
       Canonical source of truth: the GitHub repository is the primary project URL.
     `;
     expect(() => assertLlms(`${base}\n- Current release: V15.0.0-rc.1.`, {
@@ -719,23 +768,22 @@ describe('seo assets verification helpers', () => {
     expect(() => assertIndexSocialMeta(html)).not.toThrow();
   });
 
-  it('requires current discovery copy in rendered index html', () => {
+  it('requires current discovery copy in rendered landing html', () => {
     const html = `
       <html>
         <head>
-          <title>AAS Core Preview | Agent-first stacks backed by 1,678+ skills</title>
-          <meta name="description" content="Use AAS Core preview for neutral catalog retrieval and plan preview backed by 1,678+ cataloged skills." />
-          <meta property="og:title" content="AAS Core Preview | Agent-first stacks backed by 1,678+ skills" />
-          <meta property="og:description" content="Use AAS Core preview with the supporting catalog." />
-          <meta name="twitter:title" content="AAS Core Preview | Agent-first stacks backed by 1,678+ skills" />
-          <meta name="twitter:description" content="Use AAS Core preview with the supporting catalog." />
+          <title>Agentic Awesome Skills | Agent-first skill catalog and AAS Core</title>
+          <meta name="description" content="Open-source SKILL.md playbooks. Explore AAS Core for catalog search and plan preview." />
+          <meta property="og:title" content="Agentic Awesome Skills | Agent-first skill catalog and AAS Core" />
+          <meta property="og:description" content="Open-source SKILL.md playbooks. Explore AAS Core for catalog search and plan preview." />
+          <meta name="twitter:title" content="Agentic Awesome Skills | Agent-first skill catalog and AAS Core" />
+          <meta name="twitter:description" content="Open-source SKILL.md playbooks. Explore AAS Core for catalog search and plan preview." />
           <script type="application/ld+json">
             [
-              {"@context":"https://schema.org","@type":"CollectionPage","sameAs":"https://github.com/sickn33/agentic-awesome-skills"},
+              {"@context":"https://schema.org","@type":"WebPage","sameAs":"https://github.com/sickn33/agentic-awesome-skills"},
               {"@context":"https://schema.org","@type":"Organization","url":"https://github.com/sickn33/agentic-awesome-skills"},
               {"@context":"https://schema.org","@type":"WebSite"},
-              {"@context":"https://schema.org","@type":"SoftwareSourceCode","url":"https://github.com/sickn33/agentic-awesome-skills","codeRepository":"https://github.com/sickn33/agentic-awesome-skills","mainEntityOfPage":"https://owner.github.io/repo/"},
-              {"@context":"https://schema.org","@type":"FAQPage"}
+              {"@context":"https://schema.org","@type":"SoftwareSourceCode","url":"https://github.com/sickn33/agentic-awesome-skills","codeRepository":"https://github.com/sickn33/agentic-awesome-skills","mainEntityOfPage":"https://owner.github.io/repo/"}
             ]
           </script>
         </head>
@@ -745,16 +793,16 @@ describe('seo assets verification helpers', () => {
     expect(() => assertIndexDiscoveryMeta(html)).not.toThrow();
   });
 
-  it('rejects stale count labels in rendered index JSON-LD', () => {
+  it('rejects stale count labels in rendered Core JSON-LD', () => {
     const html = `
       <html>
         <head>
-          <title>AAS Core Preview | Agent-first stacks backed by 1,678+ skills</title>
+          <title>Skill Catalog | 1,678+ reusable skills | AAS</title>
           <meta name="description" content="Use AAS Core preview for neutral catalog retrieval and plan preview backed by 1,678+ cataloged skills." />
-          <meta property="og:title" content="AAS Core Preview | Agent-first stacks backed by 1,678+ skills" />
-          <meta property="og:description" content="Use AAS Core preview with the supporting catalog." />
-          <meta name="twitter:title" content="AAS Core Preview | Agent-first stacks backed by 1,678+ skills" />
-          <meta name="twitter:description" content="Use AAS Core preview with the supporting catalog." />
+          <meta property="og:title" content="Skill Catalog | 1,678+ reusable skills | AAS" />
+          <meta property="og:description" content="Explore reusable agent skills in the catalog." />
+          <meta name="twitter:title" content="Skill Catalog | 1,678+ reusable skills | AAS" />
+          <meta name="twitter:description" content="Explore reusable agent skills in the catalog." />
           <script type="application/ld+json">
             [
               {"@context":"https://schema.org","@type":"CollectionPage","sameAs":"https://github.com/sickn33/agentic-awesome-skills"},
@@ -768,7 +816,7 @@ describe('seo assets verification helpers', () => {
       </html>
     `;
 
-    expect(() => assertIndexDiscoveryMeta(html)).toThrow('stale skill count');
+    expect(() => assertCoreCatalogDiscoveryMeta(html)).toThrow('stale skill count');
   });
 
   it('requires current discovery copy in the source index shell', () => {
@@ -821,7 +869,7 @@ describe('seo assets verification helpers', () => {
       generator: 'OpenAI ImageGen',
       dimensions: { width: 1200, height: 630 },
       sha256: '763d6b5763eb64e1310fc3d6b27291a4c7b3fa6d03e9cb3f71d79ddba25f58fc',
-      visibleCopy: ['AAS Core', 'profile → stack → plan'],
+      visibleCopy: ['AAS', 'Search → Choose → Validate → Preview'],
     });
 
     expect(() => assertSocialCardProvenance(png, provenance)).not.toThrow();
@@ -935,11 +983,13 @@ describe('seo assets verification helpers', () => {
     const xml = `
       <urlset>
         <url><loc>https://owner.github.io/repo/</loc></url>
+        <url><loc>https://owner.github.io/repo/core/</loc></url>
         <url><loc>https://owner.github.io/repo/workbench/</loc></url>
       </urlset>
     `;
 
     const report = analyzeSitemap(xml, { minSkillUrls: 0 });
+    expect(report.coreUrls).toEqual(['https://owner.github.io/repo/core/']);
     expect(report.workbenchUrls).toEqual(['https://owner.github.io/repo/workbench/']);
     expect(() => assertPrerenderedWorkbenchRoutes(
       report.workbenchUrls,

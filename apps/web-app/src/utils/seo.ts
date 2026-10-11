@@ -5,7 +5,7 @@ export const DEFAULT_TOP_SKILL_COUNT = 180;
 export const DEFAULT_SOCIAL_IMAGE = 'social-card.png';
 const SITE_NAME = 'Agentic Awesome Skills';
 const REPOSITORY_URL = 'https://github.com/sickn33/agentic-awesome-skills';
-const HOSTED_CATALOG_URL = 'https://sickn33.github.io/agentic-awesome-skills/';
+const HOSTED_CATALOG_URL = 'https://aaskills.tech/';
 const TOPIC_ROUTE_PREFIX = '/topics';
 const HOME_CATALOG_COUNT_FALLBACK = 1969;
 
@@ -68,7 +68,7 @@ const FAQ_ITEMS = [
   },
 ] as const;
 
-function getCatalogCountLabel(skillCount = 0): string {
+export function getCatalogCountLabel(skillCount = 0): string {
   const visibleCount = skillCount > 0 ? skillCount : HOME_CATALOG_COUNT_FALLBACK;
   return `${visibleCount.toLocaleString('en-US')}+`;
 }
@@ -121,7 +121,9 @@ export function getAbsoluteAssetUrl(assetPath: string): string {
 function getCatalogBaseUrl(canonicalUrl: string): string {
   try {
     const parsed = new URL(canonicalUrl);
-    const strippedSkillPath = parsed.pathname.replace(/\/skill\/[^/]+\/?$/, '/');
+    const strippedSkillPath = parsed.pathname
+      .replace(/\/skill\/[^/]+\/?$/, '/')
+      .replace(/\/core\/?$/, '/');
     const normalizedPath = strippedSkillPath.endsWith('/') ? strippedSkillPath : `${strippedSkillPath}/`;
     const normalizedCatalog = normalizedPath === '' ? '/' : normalizedPath;
     return `${parsed.origin}${normalizedCatalog}`;
@@ -159,7 +161,7 @@ function buildWebSiteSchema(canonicalUrl: string): Record<string, unknown> {
     inLanguage: 'en',
     potentialAction: {
       '@type': 'SearchAction',
-      target: `${getCatalogBaseUrl(canonicalUrl).replace(/\/+$/, '')}/?q={search_term_string}`,
+      target: `${getCatalogBaseUrl(canonicalUrl).replace(/\/+$/, '')}/core/?q={search_term_string}`,
       'query-input': 'required name=search_term_string',
     },
   };
@@ -375,15 +377,11 @@ export function isTopSkill(skillId: string, skills: ReadonlyArray<Skill>, limit 
   return selectTopSkills(skills, limit).some((entry) => entry.id === skillId);
 }
 
-export function buildHomeMeta(skillCount: number): SeoMeta {
+export function buildLandingMeta(skillCount = 0): SeoMeta {
   const visibleCount = Math.max(skillCount, 0);
-  const visibleCountLabel = visibleCount > 0 ? getCatalogCountLabel(visibleCount) : '';
-  const title = visibleCount > 0
-    ? `AAS Core Preview | Agent-first stacks backed by ${visibleCountLabel} skills`
-    : 'AAS Core Preview | Agent-first skill stacks';
-  const description = visibleCount > 0
-    ? `Use AAS Core preview for neutral catalog retrieval, exact agent-owned selection, validation, and planning for Codex, Claude Code, and compatible clients, backed by ${visibleCountLabel} cataloged skills.`
-    : 'Use AAS Core preview for neutral catalog retrieval, exact agent-owned selection, validation, and planning for Codex, Claude Code, and compatible clients.';
+  const countLabel = getCatalogCountLabel(visibleCount);
+  const title = 'AAS Core | Your agent chooses. You stay in control.';
+  const description = `AAS Core records and validates your agent’s skill selection and previews a plan before project changes.${visibleCount > 0 ? ` Explore ${countLabel} reusable skills in the catalog.` : ''}`;
   return {
     title,
     description,
@@ -395,8 +393,39 @@ export function buildHomeMeta(skillCount: number): SeoMeta {
     jsonLd: (canonicalUrl: string) => [
       {
         '@context': 'https://schema.org',
+        '@type': 'WebPage',
+        name: SITE_NAME,
+        description,
+        url: canonicalUrl,
+        isPartOf: buildWebSiteSchema(canonicalUrl),
+        sameAs: REPOSITORY_URL,
+        about: buildSoftwareSourceCodeSchema(canonicalUrl, visibleCount),
+      },
+      buildOrganizationSchema(),
+      buildWebSiteSchema(canonicalUrl),
+      buildSoftwareSourceCodeSchema(canonicalUrl, visibleCount),
+    ],
+  };
+}
+
+export function buildHomeMeta(skillCount: number): SeoMeta {
+  const visibleCount = Math.max(skillCount, 0);
+  const visibleCountLabel = visibleCount > 0 ? getCatalogCountLabel(visibleCount) : '';
+  const title = visibleCount > 0 ? `Skill Catalog | ${visibleCountLabel} reusable skills | AAS` : 'Skill Catalog | Agentic Awesome Skills';
+  const description = visibleCount > 0 ? `Explore ${visibleCountLabel} reusable agent skills. Search, inspect requirements and sources, compare candidates, and hand exact IDs to your coding agent.` : 'Explore reusable agent skills. Search, inspect requirements and sources, compare candidates, and hand exact IDs to your coding agent.';
+  return {
+    title,
+    description,
+    canonicalPath: '/core',
+    ogTitle: title,
+    ogDescription: description,
+    ogImage: DEFAULT_SOCIAL_IMAGE,
+    twitterCard: 'summary_large_image',
+    jsonLd: (canonicalUrl: string) => [
+      {
+        '@context': 'https://schema.org',
         '@type': 'CollectionPage',
-        name: 'Agentic Awesome Skills',
+        name: 'AAS Core skill catalog',
         description,
         url: canonicalUrl,
         isPartOf: buildWebSiteSchema(canonicalUrl),

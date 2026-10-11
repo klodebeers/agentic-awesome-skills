@@ -1,19 +1,21 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { spawn } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const { PassThrough } = require("node:stream");
 const test = require("node:test");
 const {
   AGENT_SELECTION_CONTRACT,
+  MAX_BASE_REQUEST_BYTES,
   MAX_JSON_DEPTH,
   MAX_LINE_BYTES,
   MAX_SESSION_MANIFESTS,
   McpServer,
   TOOL_NAMES,
   parseStrictJsonLine,
+  parseMcpRequestLine,
   runStdio,
 } = require("../../lib/aas-v1/mcp");
 const core = require("../../lib/aas-v1");
@@ -67,7 +69,7 @@ test("MCP bounds composed manifest session state and evicts the oldest digest", 
 
 test("strict JSON-lines parser rejects invalid UTF-8, duplicate keys, excess depth, batches, and oversized input", () => {
   assert.deepEqual(parseStrictJsonLine(Buffer.from('{"jsonrpc":"2.0"}')), { jsonrpc: "2.0" });
-  assert.doesNotThrow(() => parseStrictJsonLine(Buffer.from(JSON.stringify({
+  const codexMetadataRequest = Buffer.from(JSON.stringify({
     jsonrpc: "2.0",
     id: 1,
     method: "tools/call",
@@ -76,7 +78,29 @@ test("strict JSON-lines parser rejects invalid UTF-8, duplicate keys, excess dep
       arguments: { query: "android ui", target: "codex", limit: 5 },
       _meta: { "x-codex-turn-metadata": { workspaces: { remotes: "x".repeat(6 * 1024) } } },
     },
-  }))));
+  }));
+  assert.ok(codexMetadataRequest.length > MAX_BASE_REQUEST_BYTES);
+  assert.throws(() => parseStrictJsonLine(codexMetadataRequest), { code: "AAS_MCP_LINE_TOO_LARGE" });
+  assert.doesNotThrow(() => parseMcpRequestLine(codexMetadataRequest));
+  const oversizedArguments = Buffer.from(JSON.stringify({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/call",
+    params: { name: "search_skills", arguments: { query: "x".repeat(6 * 1024) }, _meta: {} },
+  }));
+  assert.throws(() => parseMcpRequestLine(oversizedArguments), { code: "AAS_MCP_LINE_TOO_LARGE" });
+  const arbitraryMetadata = Buffer.from(JSON.stringify({
+    jsonrpc: "2.0",
+    id: 3,
+    method: "tools/call",
+    params: { name: "search_skills", arguments: {}, _meta: { arbitrary: "x".repeat(6 * 1024) } },
+  }));
+  assert.throws(() => parseMcpRequestLine(arbitraryMetadata), { code: "AAS_MCP_LINE_TOO_LARGE" });
+  const whitespaceInflated = Buffer.concat([
+    Buffer.from('{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_skills","arguments":{},"_meta":{}}}'),
+    Buffer.alloc(6 * 1024, 0x20),
+  ]);
+  assert.throws(() => parseMcpRequestLine(whitespaceInflated), { code: "AAS_MCP_LINE_TOO_LARGE" });
   assert.throws(
     () => parseStrictJsonLine(Buffer.from('{"key":1,"key":2}')),
     { code: "AAS_MCP_JSON_DUPLICATE_KEY" },
@@ -92,7 +116,7 @@ test("strict JSON-lines parser rejects invalid UTF-8, duplicate keys, excess dep
   );
   assert.throws(() => parseStrictJsonLine(Buffer.from("[]")), { code: "AAS_MCP_JSONRPC_BATCH_FORBIDDEN" });
   assert.throws(
-    () => parseStrictJsonLine(Buffer.alloc(MAX_LINE_BYTES + 1, 0x20)),
+    () => parseStrictJsonLine(Buffer.alloc(MAX_BASE_REQUEST_BYTES + 1, 0x20)),
     { code: "AAS_MCP_LINE_TOO_LARGE" },
   );
   assert.throws(
@@ -135,13 +159,15 @@ test("initialize rejects a missing or malformed protocol version", async () => {
   }
 });
 
-test("MCP preserves the five stack tools and adds two read-only evidence tools", async () => {
+test("MCP preserves stack/evidence tools and adds bounded read-only bundle inspection", async () => {
   const server = await initializedServer();
   const tools = await server.handle({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
   assert.deepEqual(tools.result.tools.map((entry) => entry.name), TOOL_NAMES);
   assert.deepEqual(TOOL_NAMES, [
     "search_skills",
     "get_skill",
+    "list_skill_files",
+    "read_skill_file",
     "compose_stack",
     "inspect_stack",
     "diff_stack",
@@ -226,6 +252,14 @@ test("MCP initialization imposes the agent-owned capability coverage contract", 
   });
 
   assert.equal(response.result.instructions.includes(AGENT_SELECTION_CONTRACT), true);
+  assert.match(response.result.instructions, /optional guided intake/i);
+  assert.match(response.result.instructions, /may skip the questions and let you work autonomously/i);
+  assert.match(response.result.instructions, /starting from scratch, adding a feature, or fixing a problem/i);
+  assert.match(response.result.instructions, /which languages or frameworks/i);
+  assert.match(response.result.instructions, /which important constraints apply/i);
+  assert.match(response.result.instructions, /how they will recognize success/i);
+  assert.match(response.result.instructions, /additional focused questions only when/i);
+  assert.match(response.result.instructions, /not as automatic skill selections/i);
   assert.match(response.result.instructions, /enumerate its primary capability areas/i);
   for (const dimension of [
     "architecture and runtime",
@@ -711,8 +745,17 @@ test("stdio counts the newline in the byte boundary and bounds its pending reque
   }
 
   const acceptingServer = { handle: async (request) => ({ jsonrpc: "2.0", id: request.id ?? null, result: {} }) };
-  const base = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping", pad: "" });
-  const framed = (length) => Buffer.from(`${base.slice(0, -2)}${"x".repeat(length - Buffer.byteLength(base) - 1)}\"}\n`);
+  const padMarker = "__PAD__";
+  const base = JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/call",
+    params: { name: "search_skills", arguments: {}, _meta: { "x-codex-turn-metadata": { pad: padMarker } } },
+  });
+  const framed = (length) => Buffer.from(`${base.replace(
+    padMarker,
+    "x".repeat(length - Buffer.byteLength(base) + Buffer.byteLength(padMarker) - 1),
+  )}\n`);
   const boundary = await exercise(framed(MAX_LINE_BYTES), acceptingServer);
   assert.equal(boundary[0].result !== undefined, true);
   const exploit = await exercise(framed(MAX_LINE_BYTES + 1), acceptingServer);
@@ -736,7 +779,7 @@ test("stdio counts the newline in the byte boundary and bounds its pending reque
   release();
   await runner.completed();
   const responses = Buffer.concat(chunks).toString("utf8").trim().split("\n").map((line) => JSON.parse(line));
-  assert.equal(responses.filter((entry) => entry.error?.data?.code === "AAS_MCP_QUEUE_FULL").length, 2);
+  assert.deepEqual(responses.filter((entry) => entry.error?.data?.code === "AAS_MCP_QUEUE_FULL").map((entry) => entry.id), [32, 33]);
   assert.equal(responses.filter((entry) => entry.result).length, 32);
 });
 
@@ -767,4 +810,75 @@ test("stdio entrypoint emits protocol-only stdout and survives a malformed line"
   assert.equal(lines[1].error.code, -32700);
   assert.deepEqual(lines[2].result.tools.map((entry) => entry.name), TOOL_NAMES);
   assert.equal(Buffer.concat(stderr).toString("utf8"), "");
+});
+
+
+test("MCP notifications never receive replies and invalid envelopes do not reflect invalid IDs", async () => {
+  const server = await initializedServer();
+  for (const method of ["initialize", "tools/call", "resources/read", "unknown"]) {
+    assert.equal(await server.handle({ jsonrpc: "2.0", method, params: {} }), null);
+  }
+  const invalid = await server.handle({ jsonrpc: "wrong", id: { private: "sentinel" }, method: "ping" });
+  assert.equal(invalid.id, null);
+  assert.equal(invalid.error.code, -32600);
+  const misusedNotification = await server.handle({jsonrpc: "2.0", id: "call", method: "notifications/initialized"});
+  assert.equal(misusedNotification.id, "call");
+  assert.equal(misusedNotification.error.code, -32600);
+  const noMethod = await server.handle({ jsonrpc: "2.0" });
+  assert.equal(noMethod.error.code, -32600);
+});
+
+test("saturated MCP queue suppresses notifications and parses rejected requests safely", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const chunks = [];
+  output.on("data", (chunk) => chunks.push(chunk));
+  const runner = runStdio({ handle: async (request) => ({ jsonrpc: "2.0", id: request.id, result: {} }) }, {
+    input, output, diagnostics: new PassThrough(),
+  });
+  const rows = Array.from({ length: 32 }, (_,id) => JSON.stringify({ jsonrpc: "2.0", id, method: "ping" }));
+  rows.push(JSON.stringify({ jsonrpc: "2.0", method: "notifications/cancelled", params: {} }));
+  rows.push(JSON.stringify({ jsonrpc: "2.0", id: "overflow", method: "ping" }));
+  rows.push('{"jsonrpc":"2.0","id":"first","id":"duplicate","method":"ping"}');
+  rows.push(JSON.stringify({ jsonrpc: "2.0", id: "x".repeat(129), method: "ping" }));
+  input.end(rows.join("\n") + "\n");
+  await runner.completed();
+  const replies = Buffer.concat(chunks).toString().trim().split("\n").map(JSON.parse);
+  assert.equal(replies.length, 35);
+  assert.equal(replies.find((reply) => reply.id === "overflow").error.data.code, "AAS_MCP_QUEUE_FULL");
+  assert.equal(replies.filter((reply) => reply.error?.code === -32700).length, 1);
+  assert.equal(replies.filter((reply) => reply.error?.code === -32600).length, 1);
+  assert.ok(replies.every((reply) => typeof reply.id !== "string" || reply.id.length <= 128));
+});
+
+
+test("real stdio overload correlates every call and keeps initialized notifications silent", () => {
+  const rows = [
+    { jsonrpc: "2.0", id: "init", method: "initialize", params: { protocolVersion: core.protocolVersion } },
+    { jsonrpc: "2.0", method: "notifications/initialized" },
+    ...Array.from({ length: 32 }, (_,id) => ({ jsonrpc: "2.0", id, method: "ping" })),
+  ];
+  const result = spawnSync(process.execPath, [path.join(ROOT, "tools/bin/aas-mcp.js")], {
+    input: rows.map((row) => JSON.stringify(row)).join("\n") + "\n",
+    encoding: "utf8", timeout: 15000, maxBuffer: 1024 * 1024,
+  });
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+  const replies = result.stdout.trim().split("\n").map(JSON.parse);
+  assert.equal(replies.length, 33);
+  assert.deepEqual(new Set(replies.map((reply) => reply.id)), new Set(["init", ...Array.from({length:32}, (_,id) => id)]));
+  assert.ok(replies.every((reply) => reply.result || reply.error?.data?.code === "AAS_MCP_QUEUE_FULL"));
+});
+
+test("transport exceptions do not create replies to valid notifications", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const diagnostics = new PassThrough();
+  const chunks = [];
+  output.on("data", (chunk) => chunks.push(chunk));
+  const runner = runStdio({ handle: async () => { throw new Error("private sentinel"); } }, {input, output, diagnostics});
+  input.end(JSON.stringify({jsonrpc:"2.0",method:"notifications/cancelled"}) + "\n");
+  await runner.completed();
+  assert.equal(Buffer.concat(chunks).toString(), "");
+  assert.equal(diagnostics.read().toString(), "AAS MCP notification error (details redacted)\n");
 });

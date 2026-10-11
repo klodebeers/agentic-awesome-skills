@@ -161,14 +161,14 @@ function getChangeRecords(projectRoot, baseRef, headRef) {
 }
 
 function getChangedFiles(projectRoot, baseRef, headRef) {
-  const records = getChangeRecords(projectRoot, baseRef, headRef);
-  return [...new Set(records.flatMap((record) => [record.old_path, record.new_path])
-    .filter(Boolean)
-    .map(normalizeRepoPath))];
+  return changedFilesFromRecords(getChangeRecords(projectRoot, baseRef, headRef));
 }
 
 function changedFilesFromRecords(records) {
-  return [...new Set(records.flatMap((record) => [record.old_path, record.new_path])
+  // A copy reads its origin without changing it. Renames still modify both
+  // paths, and the independent fork-safety classifier retains the raw records.
+  return [...new Set(records.flatMap((record) => record.status === "C"
+    ? [record.new_path] : [record.old_path, record.new_path])
     .filter(Boolean)
     .map(normalizeRepoPath))];
 }
@@ -181,6 +181,8 @@ function loadPullRequestEvent(eventPath) {
   const rawEvent = fs.readFileSync(safeUserPath(eventPath), "utf8");
   return JSON.parse(rawEvent).pull_request || null;
 }
+
+const { resolveReviewedSkillRoots, resolveReviewedSupportPaths } = require("../lib/reviewed-fork-skills");
 
 function evaluateForkSafety(projectRoot, changeRecords, pullRequest) {
   if (!pullRequest) {
@@ -199,13 +201,33 @@ function evaluateForkSafety(projectRoot, changeRecords, pullRequest) {
   if (headRepository === baseRepository) {
     return { applicable: false, approvalSafe: true, reasons: [], requiresHumanReview: false };
   }
+  if (Array.isArray(changeRecords) && changeRecords.length === 0) {
+    return {
+      applicable: true,
+      safe: true,
+      sensitive: false,
+      approvalSafe: true,
+      reasons: [],
+      paths: [],
+      requiresHumanReview: false,
+      canonicalSkillChanges: [],
+      skillContentChanges: [],
+    };
+  }
 
-  const preliminary = classifyChangeRecords(changeRecords, { requireBlobSizes: false });
+  const reviewedIdentity = {
+    pr: pullRequest.number, baseRepository: pullRequest.base.repo.full_name,
+    headRepository: pullRequest.head.repo.full_name, head: pullRequest.head.sha,
+  };
+  const reviewedSkillRoots = resolveReviewedSkillRoots(projectRoot, reviewedIdentity);
+  const reviewedSupportPaths = resolveReviewedSupportPaths(projectRoot, reviewedIdentity);
+  const policyOptions = { reviewedSkillRoots, reviewedSupportPaths };
+  const preliminary = classifyChangeRecords(changeRecords, { requireBlobSizes: false, ...policyOptions });
   if (!preliminary.approvalSafe) {
     return { applicable: true, ...preliminary };
   }
   const blobSizes = resolveBlobSizes(projectRoot, changeRecords);
-  return { applicable: true, ...classifyChangeRecords(changeRecords, { blobSizes }) };
+  return { applicable: true, ...classifyChangeRecords(changeRecords, { blobSizes, ...policyOptions }) };
 }
 
 function appendGithubOutput(result) {

@@ -13,6 +13,8 @@ const {
   classifyPathPolicy,
 } = require("../lib/workflow-contract");
 
+const { resolveReviewedSkillRoots, resolveReviewedSupportPaths } = require("../lib/reviewed-fork-skills");
+
 const DEFAULT_POLL_SECONDS = 20;
 const REQUIRED_CHECKS = [
   ["pr-policy", { label: "pr-policy", aliases: ["pr-policy"], appId: 15368 }],
@@ -36,13 +38,23 @@ const DISALLOWED_COAUTHOR_TRAILER_PATTERNS = [
 ];
 const FULL_SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const EVIDENCE_SCHEMA_VERSION = 1;
-const EVIDENCE_TIMEOUT_MS = 120_000;
+const EVIDENCE_TIMEOUT_MS = 300_000;
 const MAX_EVIDENCE_BYTES = 8 * 1024 * 1024;
 const APPROVAL_WORKFLOW_PATHS = new Set([
   ".github/workflows/actionlint.yml",
   ".github/workflows/ci.yml",
   ".github/workflows/codeql.yml",
   ".github/workflows/dependency-review.yml",
+  // Runs with `contents: read`, no secrets and SHA-pinned actions; it is the
+  // preview lane for `apps/web-app/**` PRs and must be approvable for fork
+  // web-app source contributions alongside ci.yml.
+  ".github/workflows/aas-agent-first-preview.yml",
+  // PR-only advisory scanner. It has no manual, push or privileged trigger,
+  // declares only `contents: read` and `checks: read`, uses no secrets, and
+  // pins every action to a full SHA. Its first job only waits for the
+  // exact-head `pr-evidence` result, so it must be approvable for fork PRs
+  // alongside the required workflows.
+  ".github/workflows/skillspector-advisory.yml",
   ".github/workflows/skill-review.yml",
 ]);
 
@@ -408,7 +420,20 @@ function readRawChangeRecords(projectRoot, baseOid, headOid, dependencies = {}) 
     ["diff", "--raw", "--no-abbrev", "-z", "-M", "--find-copies-harder", baseOid, headOid, "--"],
     projectRoot,
   );
-  return parseRawDiff(raw);
+  return parseRawDiff(raw, { allowEmpty: true });
+}
+
+function emptyChangePolicy() {
+  return {
+    safe: true,
+    sensitive: false,
+    approvalSafe: true,
+    reasons: [],
+    paths: [],
+    requiresHumanReview: false,
+    canonicalSkillChanges: [],
+    skillContentChanges: [],
+  };
 }
 
 function runGhJson(projectRoot, args, options = {}) {
@@ -1031,15 +1056,24 @@ function approveActionRequiredRuns(projectRoot, repoSlug, prDetails, options = {
   const ownerAuthorizedSensitiveChange = sameRepository
     && String(prDetails?.author?.login || "").toLowerCase() === repositoryOwner
     && reviewedHeads.has(headOid);
-  const preliminaryPolicy = classifyRecords(records, { requireBlobSizes: false });
+  const reviewedIdentity = {
+    pr: prNumber, baseRepository: repoSlug,
+    headRepository: prDetails?.headRepository?.nameWithOwner, head: headOid,
+  };
+  const reviewedSkillRoots = resolveReviewedSkillRoots(projectRoot, reviewedIdentity);
+  const reviewedSupportPaths = resolveReviewedSupportPaths(projectRoot, reviewedIdentity);
+  const policyOptions = { reviewedSkillRoots, reviewedSupportPaths };
+  const preliminaryPolicy = records.length === 0
+    ? emptyChangePolicy()
+    : classifyRecords(records, { requireBlobSizes: false, ...policyOptions });
   if (!preliminaryPolicy?.approvalSafe && !ownerAuthorizedSensitiveChange) {
     const reasons = Array.isArray(preliminaryPolicy?.reasons) && preliminaryPolicy.reasons.length
       ? preliminaryPolicy.reasons.slice(0, 12).join(", ")
       : "unclassified local diff";
     throw new Error(`PR #${prNumber} local base-to-head diff is not fork-approval-safe: ${reasons}.`);
   }
-  const blobSizes = getSizes(projectRoot, records, dependencies);
-  const policy = classifyRecords(records, { blobSizes });
+  const blobSizes = records.length === 0 ? new Map() : getSizes(projectRoot, records, dependencies);
+  const policy = records.length === 0 ? emptyChangePolicy() : classifyRecords(records, { blobSizes, ...policyOptions });
   if (!policy?.approvalSafe && !ownerAuthorizedSensitiveChange) {
     const reasons = Array.isArray(policy?.reasons) && policy.reasons.length
       ? policy.reasons.slice(0, 12).join(", ")
@@ -1314,6 +1348,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  EVIDENCE_TIMEOUT_MS,
   approvalWorkflowPaths: APPROVAL_WORKFLOW_PATHS,
   approveActionRequiredRuns,
   approveWorkflowRun,

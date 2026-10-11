@@ -3,6 +3,10 @@ import {
   ArrowsClockwise,
   ArrowsDownUp,
   ArrowLeft,
+  ArrowDown,
+  File,
+  Info,
+  TerminalWindow,
   ArrowRight,
   BookOpen,
   Check,
@@ -19,6 +23,10 @@ import {
 } from '@phosphor-icons/react';
 
 type IconName =
+  | 'terminal'
+  | 'file'
+  | 'info'
+  | 'arrowDown'
   | 'github'
   | 'search'
   | 'filter'
@@ -38,6 +46,10 @@ type IconName =
 type IconComponent = ComponentType<PhosphorIconProps>;
 
 const ICONS: Record<IconName, IconComponent> = {
+  terminal: TerminalWindow,
+  file: File,
+  info: Info,
+  arrowDown: ArrowDown,
   github: GithubLogo,
   search: MagnifyingGlass,
   filter: Funnel,

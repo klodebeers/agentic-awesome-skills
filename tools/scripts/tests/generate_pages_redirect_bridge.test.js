@@ -52,7 +52,17 @@ function readTree(root) {
 }
 
 try {
-  const locations = [current, `${current}plugins/`, `${current}topics/github-ai-skills-repository/`, `${current}skill/brainstorming/`];
+  const locations = [
+    current,
+    `${current}plugins/`,
+    `${current}topics/github-ai-skills-repository/`,
+    `${current}skill/brainstorming/`,
+    `${current}aas-core/`,
+    `${current}teams/`,
+    `${current}trust/`,
+    `${current}docs/`,
+    `${current}docs/getting-started/`,
+  ];
   fs.writeFileSync(sitemapPath, sitemap(locations), 'utf8');
   writeSkills(skillsIndexPath, ['brainstorming', 'catalog-only']);
   fs.writeFileSync(googleVerificationPath, googleVerificationBody, 'utf8');
@@ -105,6 +115,9 @@ try {
   const legacySitemapSource = fs.readFileSync(path.join(outputOne, 'antigravity-awesome-skills/sitemap.xml'), 'utf8');
   assert.strictEqual((legacySitemapSource.match(/<loc>/g) || []).length, 4, 'legacy sitemap stays on the curated source sitemap');
   assert(!legacySitemapSource.includes('/skill/catalog-only/'), 'catalog-only redirects must not expand crawler discovery');
+  assert(!manifest.redirects.some(({ to }) => /\/(teams|trust|aas-core)\/$/.test(to)), 'new informational pages have no legacy routes');
+  assert(!legacySitemapSource.includes('/teams/') && !legacySitemapSource.includes('/trust/'));
+  assert(!legacySitemapSource.includes('/docs/'), 'first-party docs must stay out of the legacy bridge');
 
   const outputTwo = path.join(fixtureRoot, '.codex', 'bridge-two');
   generateBridge(bridgeOptions(outputTwo));
@@ -245,19 +258,29 @@ try {
   const productionOutputRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pages-redirect-production-'));
   try {
     const productionOutput = path.join(productionOutputRoot, 'bridge');
-    const productionManifest = generateBridge({ outputDirectory: productionOutput });
+    const repoSitemapPath = path.resolve(__dirname, '..', '..', '..', 'apps', 'web-app', 'public', 'sitemap.xml');
+    const normalizedSitemapPath = path.join(fixtureRoot, 'production-sitemap.xml');
+    fs.writeFileSync(
+      normalizedSitemapPath,
+      fs.readFileSync(repoSitemapPath, 'utf8').replace(/asskills\.me|aaskills\.me/g, 'aaskills.tech'),
+      'utf8',
+    );
+    const productionManifest = generateBridge({
+      outputDirectory: productionOutput,
+      sitemapPath: normalizedSitemapPath,
+    });
     const productionSkills = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', '..', '..', 'skills_index.json'), 'utf8'));
-    assert.strictEqual(productionManifest.source_sitemap_route_count, 187);
+    assert.strictEqual(productionManifest.source_sitemap_route_count, 188);
     assert.strictEqual(productionManifest.current_skill_route_count, productionSkills.length);
-    assert.strictEqual(productionManifest.route_count, productionSkills.length + 7);
-    assert.strictEqual(productionManifest.legacy_sitemap_route_count, 187);
-    const expectedSkillUrls = new Set(productionSkills.map(({ id }) => `https://sickn33.github.io/agentic-awesome-skills/skill/${id}/`));
+    assert.strictEqual(productionManifest.route_count, productionSkills.length + 8);
+    assert.strictEqual(productionManifest.legacy_sitemap_route_count, 188);
+    const expectedSkillUrls = new Set(productionSkills.map(({ id }) => `https://aaskills.tech/skill/${id}/`));
     const actualSkillUrls = new Set(productionManifest.redirects.map(({ to }) => to).filter((url) => url.includes('/skill/')));
     assert.deepStrictEqual(actualSkillUrls, expectedSkillUrls, 'production bridge must cover exactly every current skill id');
     assert(!productionManifest.redirects.some(({ to }) => to.endsWith('/skill/goldrush-api/')));
     assert(!productionManifest.redirects.some(({ to }) => to.endsWith('/skill/merge-batch-e2e-test/')));
     const productionLegacySitemap = fs.readFileSync(path.join(productionOutput, 'antigravity-awesome-skills/sitemap.xml'), 'utf8');
-    assert.strictEqual((productionLegacySitemap.match(/<loc>/g) || []).length, 187);
+    assert.strictEqual((productionLegacySitemap.match(/<loc>/g) || []).length, 188);
     assert.strictEqual(
       fs.readFileSync(path.join(productionOutput, 'antigravity-awesome-skills/google5815fd8827d2319c.html'), 'utf8'),
       fs.readFileSync(path.resolve(__dirname, '..', '..', '..', 'apps/web-app/public/google5815fd8827d2319c.html'), 'utf8'),

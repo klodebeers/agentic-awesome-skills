@@ -4,6 +4,7 @@ import {
   DEFAULT_TOP_SKILL_COUNT,
   DEFAULT_SOCIAL_IMAGE,
   buildHomeMeta,
+  buildLandingMeta,
   buildSkillFallbackMeta,
   buildSkillMeta,
   buildTopicLandingMeta,
@@ -36,12 +37,25 @@ describe('SEO helpers', () => {
   it('builds homepage metadata with the canonical AAS Core preview message', () => {
     const meta = buildHomeMeta(10);
 
-    expect(meta.title).toContain('AAS Core Preview');
-    expect(meta.title).toContain('10+ skills');
-    expect(meta.description).toContain('neutral catalog retrieval, exact agent-owned selection, validation, and planning');
-    expect(meta.description).toContain('10+ cataloged skills');
-    expect(meta.canonicalPath).toBe('/');
+    expect(meta.title).toContain('Skill Catalog');
+    expect(meta.title).toContain('10+ reusable skills');
+    expect(meta.description).toContain('inspect requirements and sources');
+    expect(meta.description).toContain('10+ reusable agent skills');
+    expect(meta.canonicalPath).toBe('/core');
     expect(meta.ogTitle).toBe(meta.title);
+    expect(meta.ogImage).toBe(DEFAULT_SOCIAL_IMAGE);
+    expect(typeof meta.jsonLd).toBe('function');
+  });
+
+  it('builds intro landing metadata for the site root', () => {
+    const meta = buildLandingMeta(2445);
+
+    expect(meta.title).toContain('AAS Core');
+    expect(meta.description).toContain('2,445+ reusable skills');
+    expect(meta.description).toContain('AAS Core');
+    expect(meta.description).toContain('previews a plan');
+    expect(meta.description.length).toBeLessThanOrEqual(160);
+    expect(meta.canonicalPath).toBe('/');
     expect(meta.ogImage).toBe(DEFAULT_SOCIAL_IMAGE);
     expect(typeof meta.jsonLd).toBe('function');
   });

@@ -4,7 +4,7 @@ const https = require('node:https');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const DEFAULT_BASE_URL = 'https://sickn33.github.io/agentic-awesome-skills';
+const DEFAULT_BASE_URL = 'https://aaskills.tech';
 const baseUrl = (process.env.SEO_LIVE_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
 const repoRoot = path.resolve(__dirname, '..', '..');
 
@@ -17,6 +17,7 @@ function readExpectedState() {
   return {
     countLabel: `${skills.length.toLocaleString('en-US')}+`,
     releaseLabel: `V${pkg.version}`,
+    pluginCount: JSON.parse(fs.readFileSync(path.join(repoRoot, 'data/specialized-plugin-candidates.json'), 'utf8')).candidates.length,
   };
 }
 
@@ -69,14 +70,20 @@ function assertNotIncludes(text, snippet, label) {
 }
 
 function assertLiveSeoDocuments({ home, plugins, sitemap, llms, robots }, expected) {
-  assertIncludes(home, `AAS Core Preview | Agent-first stacks backed by ${expected.countLabel} skills`, 'home');
+  assertIncludes(home, 'AAS Core | Your agent chooses. You stay in control.', 'home title');
+  const description = home.match(/<meta\s+name=["']description["']\s+content=["']([^"']*)["']/i)?.[1];
+  if (!description) {
+    throw new Error('home description meta tag is missing');
+  }
+  assertIncludes(description, `Explore ${expected.countLabel} reusable skills`, 'home description');
+  if (description.length > 160) {
+    throw new Error(`home description is ${description.length} characters; expected no more than 160`);
+  }
   assertIncludes(home, 'SoftwareSourceCode', 'home JSON-LD');
-  assertIncludes(home, 'FAQPage', 'home JSON-LD');
-  assertIncludes(home, 'specialized plugins', 'home');
   assertIncludes(home, expected.countLabel, 'home');
   assertNotIncludes(home, 'prompt templates', 'home');
 
-  assertIncludes(plugins, 'AAS Specialized Plugins | 15 AI coding workflow packs', 'plugins');
+  assertIncludes(plugins, `AAS Specialized Plugins | ${expected.pluginCount.toLocaleString('en-US')} AI coding workflow packs`, 'plugins');
   assertIncludes(plugins, 'specialized plugin packs', 'plugins');
   assertIncludes(plugins, 'numberOfItems', 'plugins JSON-LD');
 

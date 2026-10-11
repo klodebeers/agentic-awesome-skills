@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "pr": 1337,
+      "base_repository": "sickn33/agentic-awesome-skills",
+      "head_repository": "twoicewoo/agentic-awesome-skills",
+      "skill_root": "skills/break-ai-fix-loops",
+      "reviewed_head": "d37495c6854ecc9d94751899eb3d5e2662dd7723",
+      "tree_oid": "1e5184dcd44eb1130d7f32ff246e424cba21a23f"
+    },
+    {
+      "pr": 1413,
+      "base_repository": "sickn33/agentic-awesome-skills",
+      "head_repository": "Pranav-Nexus/agentic-awesome-skills",
+      "skill_root": "skills/skill-porter",
+      "reviewed_head": "43b06dfdf31482297fc140a8cf7adc31194adc33",
+      "tree_oid": "accbfb34570362bb4422985bd487f22d2f2c7acb"
+    },
+    {
+      "pr": 1756,
+      "base_repository": "sickn33/agentic-awesome-skills",
+      "head_repository": "gongdear/agentic-awesome-skills",
+      "skill_root": "skills/cline-pilot",
+      "reviewed_head": "8010a79f20b923504002c44dc3dcd974624cfe30",
+      "tree_oid": "33d10138e8346e45611671fe2d2f1f033ca5a15b",
+      "reviewed_support_paths": [
+        "skills/cline-pilot/.gitignore",
+        "skills/cline-pilot/README.md"
+      ]
+    },
+    {
+      "pr": 1838,
+      "base_repository": "sickn33/agentic-awesome-skills",
+      "head_repository": "stas4000/agentic-awesome-skills",
+      "skill_root": "skills/tastegate",
+      "reviewed_head": "6c644174654c778e4ccaefc29124515189ab422e",
+      "tree_oid": "a0c276935ee6b3f608d22a663a83ce0fd2b91702"
+    },
+    {
+      "pr": 1838,
+      "base_repository": "sickn33/agentic-awesome-skills",
+      "head_repository": "stas4000/agentic-awesome-skills",
+      "skill_root": "skills/what-could-break",
+      "reviewed_head": "6c644174654c778e4ccaefc29124515189ab422e",
+      "tree_oid": "42db8ca5bd1cd664b4bdf3908205f554d20fd0c3"
+    }
+  ]
+}

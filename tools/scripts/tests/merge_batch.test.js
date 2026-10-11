@@ -8,6 +8,12 @@ const HEAD_SHA = "2".repeat(40);
 const BLOB_SHA = "3".repeat(40);
 const ZERO_SHA = "0".repeat(40);
 
+assert.strictEqual(
+  mergeBatch.EVIDENCE_TIMEOUT_MS,
+  300_000,
+  "repository-wide trusted evidence must have a five-minute execution budget",
+);
+
 function makeCheckRun(name, status, conclusion, startedAt, id, suiteId = 1) {
   return {
     name,
@@ -209,6 +215,19 @@ function evidenceSnapshot(overrides = {}) {
   assert.throws(() => mergeBatch.parseRawDiff(invalidUtf8), /canonical UTF-8/);
 }
 
+{
+  const records = mergeBatch.readRawChangeRecords("/tmp/repo", BASE_SHA, HEAD_SHA, {
+    runCommandBuffer() {
+      return Buffer.alloc(0);
+    },
+  });
+  assert.deepStrictEqual(
+    records,
+    [],
+    "a zero-diff contributor PR should remain mergeable through the protected batch workflow",
+  );
+}
+
 function workflowFixture(overrides = {}) {
   return {
     id: 100,
@@ -242,6 +261,22 @@ function runFixture(overrides = {}) {
     HEAD_SHA,
   );
   assert.strictEqual(valid.length, 1);
+
+  assert.ok(
+    mergeBatch.approvalWorkflowPaths.has(".github/workflows/aas-agent-first-preview.yml"),
+    "the pinned read-only AAS agent-first preview workflow must be approvable for fork web-app PRs",
+  );
+  assert.ok(
+    mergeBatch.approvalWorkflowPaths.has(".github/workflows/skillspector-advisory.yml"),
+    "the pinned read-only SkillSpector advisory workflow must be approvable for fork skill PRs",
+  );
+  const previewValid = mergeBatch.validateActionRequiredRuns(
+    [runFixture({ path: ".github/workflows/aas-agent-first-preview.yml", workflow_id: 102 })],
+    [workflowFixture({ id: 102, path: ".github/workflows/aas-agent-first-preview.yml" })],
+    450,
+    HEAD_SHA,
+  );
+  assert.strictEqual(previewValid.length, 1);
 
   const emptyMetadataIdentity = {
     headRefName: "feature/example",
@@ -345,6 +380,27 @@ function approvalDependencies(overrides = {}) {
 
 {
   const prDetails = { number: 450, baseRefName: "main", baseRefOid: BASE_SHA, headRefOid: HEAD_SHA };
+  let blobReads = 0;
+  let classifications = 0;
+  const dependencies = approvalDependencies({
+    readRawChangeRecords() { return []; },
+    resolveBlobSizes() { blobReads += 1; return new Map(); },
+    classifyChangeRecords() { classifications += 1; throw new Error("empty diffs need no path classification"); },
+    listActionRequiredRuns() { return []; },
+  });
+  const result = mergeBatch.approveActionRequiredRuns("/repo", "owner/repo", prDetails, {
+    dependencies,
+    dryRun: true,
+  });
+  assert.strictEqual(result.policy.approvalSafe, true);
+  assert.deepStrictEqual(result.records, []);
+  assert.strictEqual(result.policy.requiresHumanReview, false);
+  assert.strictEqual(blobReads, 0);
+  assert.strictEqual(classifications, 0);
+}
+
+{
+  const prDetails = { number: 450, baseRefName: "main", baseRefOid: BASE_SHA, headRefOid: HEAD_SHA };
   const supportRecord = {
     status: "M",
     old_path: "skills/example/references/guide.md",
@@ -368,6 +424,36 @@ function approvalDependencies(overrides = {}) {
     reviewedHeads: [HEAD_SHA],
     dryRun: true,
   });
+  assert.strictEqual(approved.policy.requiresHumanReview, true);
+  assert.deepStrictEqual(approved.policy.canonicalSkillChanges, []);
+}
+
+{
+  const prDetails = { number: 450, baseRefName: "main", baseRefOid: BASE_SHA, headRefOid: HEAD_SHA };
+  const webAppRecord = {
+    status: "M",
+    old_path: "apps/web-app/src/hooks/useSkillStars.ts",
+    new_path: "apps/web-app/src/hooks/useSkillStars.ts",
+    old_mode: "100644",
+    new_mode: "100644",
+    old_oid: BASE_SHA,
+    new_oid: BLOB_SHA,
+  };
+  const dependencies = approvalDependencies({
+    readRawChangeRecords() { return [webAppRecord]; },
+    resolveBlobSizes() { return new Map([[BASE_SHA, 100], [BLOB_SHA, 100]]); },
+  });
+  assert.throws(
+    () => mergeBatch.approveActionRequiredRuns("/repo", "owner/repo", prDetails, { dependencies }),
+    /--reviewed-head/,
+    "web-app browser source must require an exact-head maintainer attestation",
+  );
+  const approved = mergeBatch.approveActionRequiredRuns("/repo", "owner/repo", prDetails, {
+    dependencies,
+    reviewedHeads: [HEAD_SHA],
+    dryRun: true,
+  });
+  assert.strictEqual(approved.policy.approvalSafe, true);
   assert.strictEqual(approved.policy.requiresHumanReview, true);
   assert.deepStrictEqual(approved.policy.canonicalSkillChanges, []);
 }

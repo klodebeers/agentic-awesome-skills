@@ -1,8 +1,9 @@
 ---
 name: speckit-updater
 description: SpecKit Safe Update
-risk: unknown
+risk: critical
 source: community
+date_added: "2026-09-04"
 ---
 
 # SpecKit Safe Update

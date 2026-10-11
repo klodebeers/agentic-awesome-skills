@@ -1,3 +1,6 @@
+import Ajv2020 from 'ajv/dist/2020';
+import evidenceSchema from '../../../../schemas/aas-v1/selection-evidence.schema.json';
+
 export const WORKBENCH_MAX_IMPORT_BYTES = 256 * 1024;
 export const WORKBENCH_MAX_JSON_DEPTH = 24;
 
@@ -11,7 +14,29 @@ const SCOPES = new Set(['project', 'user']);
 const OPERATION_KINDS = new Set(['install', 'replaceManaged', 'removeManaged']);
 const FORBIDDEN_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 
-export type WorkbenchArtifactKind = 'stack' | 'plan';
+export type WorkbenchArtifactKind = 'stack' | 'plan' | 'evidence';
+
+export interface SelectionEvidenceReview {
+  schemaVersion: 1;
+  kind: 'aas.selection-evidence';
+  digest: string;
+  payload: {
+    schemaVersion: 1;
+    kind: 'aas.selection-evidence.payload';
+    project: { schemaVersion: 1; fingerprint: string; commit?: string; files: Array<{ path: string; size: number; sha256: string }> };
+    catalog: CatalogIdentity;
+    manifestDigest: string;
+    dimensions: Array<{ id: string; status: 'applicable' | 'not-applicable'; capabilityIds: string[] }>;
+    capabilities: Array<{ id: string; dimensionId: string; status: 'covered' | 'catalog-gap' | 'not-applicable'; evidence: Array<{ path: string; sha256: string }>; selectedSkillIds: string[] }>;
+    selectedSkillIds: string[];
+    processTrace: { schemaVersion: 1; calls: Array<{ sequence: number; tool: string; attempt: number; input: Record<string, unknown>; output: Record<string, unknown>; canonicalInputBytes: number; canonicalOutputBytes: number; retryOf?: number }> };
+    client?: { name: string; version: string; model?: string };
+  };
+  runtimeObservations?: { schemaVersion: 1; digestScope: 'excluded-from-evidence-digest'; calls: Array<{ sequence: number; durationMicros: number }> };
+}
+
+// Compile only the repository-owned schema; imported artifacts cannot supply code or schemas.
+const validateEvidenceShape = new Ajv2020({ allErrors: false, strict: true, allowUnionTypes: true, validateFormats: false }).compile<SelectionEvidenceReview>(evidenceSchema);
 
 export interface StackManifestReview {
   schemaVersion: 2;
@@ -88,7 +113,23 @@ export interface PlanOverride {
 
 export type ParsedWorkbenchArtifact =
   | { kind: 'stack'; value: StackManifestReview }
-  | { kind: 'plan'; value: PlanReview };
+  | { kind: 'plan'; value: PlanReview }
+  | { kind: 'evidence'; value: SelectionEvidenceReview };
+
+export type PairCheckId = 'manifestDigest' | 'catalog' | 'skills' | 'target' | 'profile' | 'evidenceManifest' | 'evidenceCatalog' | 'evidenceSkills';
+export interface WorkbenchPairReview {
+  status: 'consistent' | 'inconsistent';
+  checks: Array<{ id: PairCheckId; label: string; status: 'match' | 'mismatch' }>;
+}
+export interface WorkbenchPairPlan {
+  payload: {
+    manifestDigest: string;
+    catalog: CatalogIdentity;
+    desiredSkills: string[];
+    target: Target;
+    profile?: ProjectProfile;
+  };
+}
 
 export class WorkbenchImportError extends Error {
   constructor(message: string) {
@@ -127,6 +168,11 @@ function text(value: unknown, path: string, maxLength = 256): string {
   return value;
 }
 
+function nonEmptyText(value: unknown, path: string): string {
+  if (typeof value !== 'string' || value.length === 0) fail(`${path} must be a non-empty string.`);
+  return value;
+}
+
 function literal<T extends string | number>(value: unknown, expected: T, path: string): T {
   if (value !== expected) fail(`${path} must equal ${JSON.stringify(expected)}.`);
   return expected;
@@ -149,24 +195,39 @@ function id(value: unknown, path: string): string {
   return parsed;
 }
 
-function stringArray(value: unknown, path: string, options: { min?: number; max: number; ids?: boolean }): string[] {
+function stringArray(value: unknown, path: string, options: { min?: number; max: number; ids?: boolean; itemMaxLength?: number }): string[] {
   if (!Array.isArray(value) || value.length < (options.min ?? 0) || value.length > options.max) {
     fail(`${path} must contain ${options.min ?? 0} to ${options.max} items.`);
   }
-  const parsed = value.map((entry, index) => options.ids ? id(entry, `${path}[${index}]`) : text(entry, `${path}[${index}]`, 256));
+  const parsed = value.map((entry, index) => options.ids
+    ? id(entry, `${path}[${index}]`)
+    : text(entry, `${path}[${index}]`, options.itemMaxLength ?? 256));
   if (new Set(parsed).size !== parsed.length) fail(`${path} must not contain duplicates.`);
   return parsed;
 }
 
-function parseCatalog(value: unknown, path: string, runtime = false): CatalogIdentity & { closureDigest?: string } {
+type CatalogValidationMode = 'stack' | 'plan' | 'runtime';
+
+function parseCatalog(value: unknown, path: string, mode: CatalogValidationMode): CatalogIdentity & { closureDigest?: string } {
   const entry = record(value, path);
+  const runtime = mode === 'runtime';
   const keys = runtime ? ['package', 'version', 'integrity', 'closureDigest'] : ['package', 'version', 'integrity'];
   exactKeys(entry, keys, keys, path);
-  const packageName = text(entry.package, `${path}.package`, 214);
-  const version = text(entry.version, `${path}.version`, 64);
-  const integrity = runtime ? text(entry.integrity, `${path}.integrity`, 512) : digest(entry.integrity, `${path}.integrity`);
-  if (!PACKAGE_PATTERN.test(packageName)) fail(`${path}.package is not a valid package name.`);
-  if (!VERSION_PATTERN.test(version)) fail(`${path}.version is not a valid version.`);
+
+  // Stack manifests publish npm-style identity constraints. Plan catalog and
+  // runtime identities intentionally require only non-empty strings, so the
+  // reviewer must not narrow their separate schemas.
+  const packageName = mode === 'stack'
+    ? text(entry.package, `${path}.package`, 214)
+    : nonEmptyText(entry.package, `${path}.package`);
+  const version = mode === 'stack'
+    ? text(entry.version, `${path}.version`, 64)
+    : nonEmptyText(entry.version, `${path}.version`);
+  const integrity = runtime
+    ? text(entry.integrity, `${path}.integrity`, 512)
+    : digest(entry.integrity, `${path}.integrity`);
+  if (mode === 'stack' && !PACKAGE_PATTERN.test(packageName)) fail(`${path}.package is not a valid package name.`);
+  if (mode === 'stack' && !VERSION_PATTERN.test(version)) fail(`${path}.version is not a valid version.`);
   return runtime
     ? { package: packageName, version, integrity, closureDigest: digest(entry.closureDigest, `${path}.closureDigest`) }
     : { package: packageName, version, integrity };
@@ -190,11 +251,11 @@ function parseProfile(value: unknown, path: string): ProjectProfile {
   const required = ['goals', 'languages', 'frameworks', 'constraints'];
   exactKeys(entry, allowed, required, path);
   return {
-    goals: stringArray(entry.goals, `${path}.goals`, { max: 32 }),
-    ...(entry.projectType === undefined ? {} : { projectType: text(entry.projectType, `${path}.projectType`, 2048) }),
-    languages: stringArray(entry.languages, `${path}.languages`, { max: 32 }),
-    frameworks: stringArray(entry.frameworks, `${path}.frameworks`, { max: 32 }),
-    constraints: stringArray(entry.constraints, `${path}.constraints`, { max: 32 }),
+    goals: stringArray(entry.goals, `${path}.goals`, { min: 1, max: 32, itemMaxLength: 128 }),
+    ...(entry.projectType === undefined ? {} : { projectType: text(entry.projectType, `${path}.projectType`, 256) }),
+    languages: stringArray(entry.languages, `${path}.languages`, { max: 32, itemMaxLength: 128 }),
+    frameworks: stringArray(entry.frameworks, `${path}.frameworks`, { max: 32, itemMaxLength: 128 }),
+    constraints: stringArray(entry.constraints, `${path}.constraints`, { max: 32, itemMaxLength: 128 }),
   };
 }
 
@@ -203,9 +264,9 @@ function parseVersions(value: unknown, path: string): Versions {
   const keys = ['protocolVersion', 'coreVersion', 'catalogSchemaVersion'];
   exactKeys(entry, keys, keys, path);
   return {
-    protocolVersion: text(entry.protocolVersion, `${path}.protocolVersion`, 64),
-    coreVersion: text(entry.coreVersion, `${path}.coreVersion`, 64),
-    catalogSchemaVersion: text(entry.catalogSchemaVersion, `${path}.catalogSchemaVersion`, 64),
+    protocolVersion: nonEmptyText(entry.protocolVersion, `${path}.protocolVersion`),
+    coreVersion: nonEmptyText(entry.coreVersion, `${path}.coreVersion`),
+    catalogSchemaVersion: nonEmptyText(entry.catalogSchemaVersion, `${path}.catalogSchemaVersion`),
   };
 }
 
@@ -246,7 +307,7 @@ function parseStack(value: unknown): StackManifestReview {
   return {
     schemaVersion: literal(root.schemaVersion, 2, 'stack.schemaVersion'),
     name,
-    catalog: parseCatalog(root.catalog, 'stack.catalog') as CatalogIdentity,
+    catalog: parseCatalog(root.catalog, 'stack.catalog', 'stack') as CatalogIdentity,
     targets: targets as Target[],
     profile: parseProfile(root.profile, 'stack.profile'),
     skills,
@@ -319,8 +380,8 @@ function parsePlan(value: unknown): PlanReview {
       kind: literal(payload.kind, 'aas.stack-plan.payload', 'plan.payload.kind'),
       versions: parseVersions(payload.versions, 'plan.payload.versions'),
       manifestDigest: digest(payload.manifestDigest, 'plan.payload.manifestDigest'),
-      catalog: parseCatalog(payload.catalog, 'plan.payload.catalog') as CatalogIdentity,
-      runtime: parseCatalog(payload.runtime, 'plan.payload.runtime', true) as CatalogIdentity & { closureDigest: string },
+      catalog: parseCatalog(payload.catalog, 'plan.payload.catalog', 'plan') as CatalogIdentity,
+      runtime: parseCatalog(payload.runtime, 'plan.payload.runtime', 'runtime') as CatalogIdentity & { closureDigest: string },
       target: parseTarget(payload.target, 'plan.payload.target', true) as Target & { adapterVersion: string; identityDigest: string },
       installedState: {
         digest: digest(installedState.digest, 'plan.payload.installedState.digest'),
@@ -343,6 +404,26 @@ function utf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
 
+// JSON.parse validates syntax but discards duplicate keys. Inspect tokens from
+// valid JSON before projecting fields so a review never hides overwritten data.
+function rejectDuplicateJsonProperties(input: string): void {
+  const scopes: Array<{ keys: Set<string>; expectingKey: boolean } | null> = [];
+  const tokens = input.matchAll(/"(?:[^"\\]|\\.)*"|[{}[\],:]/g);
+  for (const [token] of tokens) {
+    const current = scopes[scopes.length - 1];
+    if (token === '{') scopes.push({ keys: new Set(), expectingKey: true });
+    else if (token === '[') scopes.push(null);
+    else if (token === '}' || token === ']') scopes.pop();
+    else if (token === ',' && current) current.expectingKey = true;
+    else if (token === ':' && current) current.expectingKey = false;
+    else if (token.startsWith('"') && current?.expectingKey) {
+      const key = JSON.parse(token) as string;
+      if (current.keys.has(key)) fail('Artifact contains a duplicate JSON property.');
+      current.keys.add(key);
+    }
+  }
+}
+
 export function parseWorkbenchArtifact(input: string, expectedKind: WorkbenchArtifactKind): ParsedWorkbenchArtifact {
   const byteLength = utf8ByteLength(input);
   if (byteLength === 0) fail('Paste or select a JSON artifact first.');
@@ -354,7 +435,12 @@ export function parseWorkbenchArtifact(input: string, expectedKind: WorkbenchArt
   } catch {
     fail('Artifact is not valid JSON.');
   }
+  rejectDuplicateJsonProperties(input);
   checkDepth(parsed);
+  if (expectedKind === 'evidence') {
+    if (!validateEvidenceShape(parsed)) fail('Evidence does not match the supported selection-evidence schema.');
+    return { kind: 'evidence', value: parsed };
+  }
   return expectedKind === 'stack'
     ? { kind: 'stack', value: parseStack(parsed) }
     : { kind: 'plan', value: parsePlan(parsed) };
@@ -385,6 +471,124 @@ function canonicalize(value: unknown): unknown {
 
 export function canonicalWorkbenchJson(value: unknown): string {
   return JSON.stringify(canonicalize(value));
+}
+
+export async function verifySelectionEvidence(evidence: SelectionEvidenceReview): Promise<void> {
+  const payload = evidence.payload;
+  if (await sha256WorkbenchDigest(payload) !== evidence.digest) fail('Evidence digest does not match its canonical payload.');
+  const files = payload.project.files;
+  const fileMap = new Map<string, string>();
+  for (const file of files) {
+    if (file.path !== file.path.normalize('NFC') || /^[A-Za-z]:/.test(file.path)
+      || /[\\%]/.test(file.path)
+      || [...file.path].some((character) => character.charCodeAt(0) <= 0x1f || character.charCodeAt(0) === 0x7f)
+      || file.path.split('/').some((part) => !part || part === '.' || part === '..')) fail('Evidence contains an unsafe repository-relative path.');
+    if (fileMap.has(file.path) || !Number.isSafeInteger(file.size)) fail('Evidence project files contain duplicate paths or an unsafe size.');
+    fileMap.set(file.path, file.sha256);
+  }
+  const sortedFiles = [...files].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  const descriptor = { schemaVersion: 1, ...(payload.project.commit ? { commit: payload.project.commit } : {}), files: sortedFiles };
+  if (canonicalWorkbenchJson(files) !== canonicalWorkbenchJson(sortedFiles)
+    || await sha256WorkbenchDigest(descriptor) !== payload.project.fingerprint) fail('Evidence project fingerprint does not match its file inventory.');
+  const dimensionIds = new Set(payload.dimensions.map((dimension) => dimension.id));
+  const canonicalDimensions = evidenceSchema.$defs.dimension.properties.id.enum;
+  if (dimensionIds.size !== 10 || payload.dimensions.some((dimension, index) => dimension.id !== canonicalDimensions[index])) fail('Evidence must declare each of the ten dimensions in canonical order.');
+  const capabilities = new Map(payload.capabilities.map((capability) => [capability.id, capability]));
+  if (capabilities.size !== payload.capabilities.length) fail('Evidence capability IDs must be unique.');
+  const declared = new Set<string>();
+  const mappedSkills = new Set<string>();
+  for (const dimension of payload.dimensions) {
+    if ((dimension.status === 'not-applicable') !== (dimension.capabilityIds.length === 0)) fail('Evidence dimension status disagrees with its capability list.');
+    for (const capabilityId of dimension.capabilityIds) {
+      if (capabilities.get(capabilityId)?.dimensionId !== dimension.id || declared.has(capabilityId)) fail('Evidence dimension references do not match its capabilities.');
+      declared.add(capabilityId);
+    }
+  }
+  for (const capability of capabilities.values()) {
+    if (!declared.has(capability.id)) fail('Evidence contains an undeclared capability.');
+    if (capability.status === 'covered') {
+      if (!capability.selectedSkillIds.length || !capability.evidence.length) fail('A covered capability needs skill IDs and project evidence.');
+      capability.selectedSkillIds.forEach((skillId) => mappedSkills.add(skillId));
+    } else if (capability.selectedSkillIds.length) fail('An uncovered capability cannot claim selected skills.');
+    if (capability.status === 'catalog-gap' && !capability.evidence.length) fail('A catalog gap needs project evidence.');
+    for (const reference of capability.evidence) {
+      if (fileMap.get(reference.path) !== reference.sha256) fail('A capability references an unknown or mismatched project file.');
+    }
+  }
+  if (canonicalWorkbenchJson([...mappedSkills].sort()) !== canonicalWorkbenchJson([...payload.selectedSkillIds].sort())) fail('Evidence skill mappings disagree with its selected IDs.');
+  const calls = payload.processTrace.calls;
+  if (calls.some((call, index) => index > 0 && call.sequence <= calls[index - 1].sequence)) fail('Evidence trace sequences must be increasing.');
+  const composed = calls.find((call) => call.tool === 'compose_stack' && call.output.ok === true
+    && call.output.manifestDigest === payload.manifestDigest
+    && canonicalWorkbenchJson(call.input.skillIds) === canonicalWorkbenchJson(payload.selectedSkillIds)
+    && canonicalWorkbenchJson(call.output.selectedSkillIds) === canonicalWorkbenchJson(payload.selectedSkillIds));
+  if (!composed || !calls.some((call) => call.sequence > composed.sequence && call.tool === 'inspect_stack'
+    && call.output.ok === true && call.output.status === 'valid'
+    && call.input.manifestDigest === payload.manifestDigest && call.output.manifestDigest === payload.manifestDigest
+    && canonicalWorkbenchJson(call.output.selectedSkillIds) === canonicalWorkbenchJson(payload.selectedSkillIds))) fail('Evidence lacks a matching composition followed by successful inspection.');
+}
+
+export function reviewWorkbenchEvidencePair(stack: StackManifestReview, evidence: SelectionEvidenceReview, manifestDigest: string): WorkbenchPairReview {
+  const checks: WorkbenchPairReview['checks'] = [
+    { id: 'evidenceManifest', label: 'Evidence manifest digest', status: evidence.payload.manifestDigest === manifestDigest ? 'match' : 'mismatch' },
+    { id: 'evidenceCatalog', label: 'Evidence catalog identity', status: canonicalWorkbenchJson(stack.catalog) === canonicalWorkbenchJson(evidence.payload.catalog) ? 'match' : 'mismatch' },
+    { id: 'evidenceSkills', label: 'Evidence selected skills', status: canonicalWorkbenchJson(stack.skills.map((skill) => skill.id)) === canonicalWorkbenchJson(evidence.payload.selectedSkillIds) ? 'match' : 'mismatch' },
+  ];
+  return { status: checks.every((check) => check.status === 'match') ? 'consistent' : 'inconsistent', checks };
+}
+
+function targetKey(target: Target): string {
+  return `${target.host}:${target.scope}`;
+}
+
+function sortedIds(ids: string[]): string[] {
+  return [...ids].sort((left, right) => left.localeCompare(right));
+}
+
+export function reviewWorkbenchPair(
+  stack: StackManifestReview,
+  plan: WorkbenchPairPlan,
+  stackManifestDigest: string,
+): WorkbenchPairReview {
+  const checks: WorkbenchPairReview['checks'] = [
+    {
+      id: 'manifestDigest',
+      label: 'Manifest digest',
+      status: plan.payload.manifestDigest === stackManifestDigest ? 'match' : 'mismatch',
+    },
+    {
+      id: 'catalog',
+      label: 'Catalog identity',
+      status: canonicalWorkbenchJson(stack.catalog) === canonicalWorkbenchJson(plan.payload.catalog) ? 'match' : 'mismatch',
+    },
+    {
+      id: 'skills',
+      label: 'Selected skills',
+      status: canonicalWorkbenchJson(sortedIds(stack.skills.map((skill) => skill.id)))
+        === canonicalWorkbenchJson(sortedIds(plan.payload.desiredSkills)) ? 'match' : 'mismatch',
+    },
+    {
+      id: 'target',
+      label: 'Plan target',
+      status: stack.targets.some((target) => targetKey(target) === targetKey(plan.payload.target)) ? 'match' : 'mismatch',
+    },
+    {
+      id: 'profile',
+      label: 'Project profile',
+      status: canonicalWorkbenchJson(stack.profile) === canonicalWorkbenchJson(plan.payload.profile) ? 'match' : 'mismatch',
+    },
+  ];
+  return {
+    status: checks.every((check) => check.status === 'match') ? 'consistent' : 'inconsistent',
+    checks,
+  };
+}
+
+export async function sha256WorkbenchDigest(value: unknown): Promise<string> {
+  if (!globalThis.crypto?.subtle) fail('This browser cannot verify artifact digests.');
+  const bytes = new TextEncoder().encode(canonicalWorkbenchJson(value));
+  const digestBytes = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes));
+  return `sha256-${Array.from(digestBytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
 }
 
 export async function verifyPlanDigest(plan: PlanReview): Promise<boolean> {

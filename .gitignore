@@ -1,3 +1,4 @@
+.env.local
 node_modules/
 __pycache__/
 .ruff_cache/
@@ -54,8 +55,10 @@ validation-baseline.json
 # Web app generated assets (from npm run app:setup)
 apps/web-app/public/skills/
 apps/web-app/public/skills.json
+apps/web-app/public/api/info.json
 
 skills/spline-3d-integration/*.zip
 
 # Temporary plugin staging directories
 plugins/.antigravity-awesome-skills.staging-*/
+.vercel

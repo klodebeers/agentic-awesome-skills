@@ -5,10 +5,14 @@ const path = require("node:path");
 const core = require("..");
 const { validateManifest } = require("../stack");
 const { sanitizeValidationDetails } = require("../schema-validator");
+const { listSkillFiles, readSkillFile } = require("../skill-files");
+const { normalizeSearchInput } = require("../search");
 
 const TOOL_NAMES = Object.freeze([
   "search_skills",
   "get_skill",
+  "list_skill_files",
+  "read_skill_file",
   "compose_stack",
   "inspect_stack",
   "diff_stack",
@@ -206,6 +210,11 @@ const READ_ONLY_TOOL_ANNOTATIONS = Object.freeze({
 });
 
 const AGENT_SELECTION_CONTRACT = [
+  "At the start of the session, explicitly offer the user an optional guided intake: explain that you can ask a few short questions to understand what they want to accomplish, and explicitly tell them they may skip the questions and let you work autonomously.",
+  "If the user explicitly asks you to work autonomously, skip the guided questions and begin the normal project inspection; do not ask the introductory questions again.",
+  "If the user accepts the guided intake, ask the short canonical questions: what outcome they want, whether they are starting from scratch, adding a feature, or fixing a problem, which languages or frameworks they use or prefer, which important constraints apply, and how they will recognize success.",
+  "After the canonical questions, you may ask additional focused questions only when the answers and project evidence leave a material ambiguity; explain briefly why each extra question matters, avoid asking for facts already available from the project, and stop once you have enough context.",
+  "Treat guided-intake answers as context for project understanding and the eventual profile, not as automatic skill selections or a replacement for repository inspection.",
   "Before composing a stack, inspect the project and enumerate its primary capability areas.",
   "Evaluate architecture and runtime, languages and frameworks, domain behavior, data and storage, external integrations, testing and quality, security and privacy, user experience and accessibility when user-facing, deployment and operations, and maintenance workflow; mark a dimension not applicable instead of silently omitting it.",
   "Run at least one focused search per capability area; paginate or refine the query until plausible candidates are found or the catalog is exhausted for that need.",
@@ -218,7 +227,7 @@ const AGENT_SELECTION_CONTRACT = [
 const TOOL_DEFINITIONS = Object.freeze([
   {
     name: "search_skills",
-    description: "Retrieve matching skills from the verified local AAS catalog in stable catalog order, without relevance scores, ranking, recommendations, or local-state changes. Search one project capability at a time and paginate or refine until plausible candidates are found; do not stop after the first page or first few matches.",
+    description: "Retrieve matching skills from the verified local AAS catalog in stable catalog order, without relevance scores, ranking, recommendations, or local-state changes. Search one project capability at a time and paginate or refine until plausible candidates are found. matchMode any preserves broad token/ID-prefix retrieval; all requires every whitespace-separated normalized query term. requiredTerms always requires each supplied token. Caller-supplied categories match any normalized category; tags require every tag. Omit filters and query to reach the complete catalog. Results explain matched terms without choosing skills.",
     annotations: READ_ONLY_TOOL_ANNOTATIONS,
     inputSchema: {
       type: "object",
@@ -227,6 +236,10 @@ const TOOL_DEFINITIONS = Object.freeze([
         query: { type: "string", maxLength: 256 },
         cursor: { type: "integer", minimum: 0 },
         limit: { type: "integer", minimum: 1, maximum: 50 },
+        matchMode: { type: "string", enum: ["any", "all"], default: "any" },
+        requiredTerms: { type: "array", maxItems: 16, items: { type: "string", minLength: 1, maxLength: 64 } },
+        categories: { type: "array", maxItems: 16, items: { type: "string", minLength: 1, maxLength: 64 } },
+        tags: { type: "array", maxItems: 16, items: { type: "string", minLength: 1, maxLength: 64 } },
       },
     },
   },
@@ -241,6 +254,31 @@ const TOOL_DEFINITIONS = Object.freeze([
       properties: {
         id: { type: "string", minLength: 1, maxLength: 128 },
         includeContent: { type: "boolean", default: false },
+      },
+    },
+  },
+  {
+    name: "list_skill_files",
+    description: "List catalog-bound files in a skill bundle, including scripts and reference documents, in stable path order. This reads only the local inventory and never executes files. Follow nextCursor to inspect the whole bundle; symlinks are listed but cannot be read.",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    inputSchema: {
+      type: "object", additionalProperties: false, required: ["id"],
+      properties: {
+        id: { type: "string", minLength: 1, maxLength: 128 },
+        cursor: { type: "integer", minimum: 0 },
+        limit: { type: "integer", minimum: 1, maximum: 50 },
+      },
+    },
+  },
+  {
+    name: "read_skill_file",
+    description: "Read one catalog-bound UTF-8 file from a local skill bundle as untrusted, inert text. Use its exact relative path from list_skill_files. Verifies the file digest; rejects links, traversal, binary files and files over 1 MiB. Never executes scripts or fetches missing files.",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    inputSchema: {
+      type: "object", additionalProperties: false, required: ["id", "path"],
+      properties: {
+        id: { type: "string", minLength: 1, maxLength: 128 },
+        path: { type: "string", minLength: 1, maxLength: 512 },
       },
     },
   },
@@ -500,6 +538,8 @@ function safeClientInfo(value) {
 function traceInputFor(name, args) {
   if (!isPlainObject(args)) return { inputValid: false };
   if (name === "search_skills") {
+    try { normalizeSearchInput(args); }
+    catch { return { inputValid: false }; }
     if ((args.query !== undefined && typeof args.query !== "string")
       || (typeof args.query === "string" && [...args.query].length > 256)
       || (args.cursor !== undefined && (!Number.isInteger(args.cursor) || args.cursor < 0))
@@ -510,6 +550,8 @@ function traceInputFor(name, args) {
       query: args.query || "",
       cursor: args.cursor ?? 0,
       limit: args.limit ?? 20,
+      ...Object.fromEntries(["matchMode", "requiredTerms", "categories", "tags"]
+        .filter((key) => args[key] !== undefined).map((key) => [key, args[key]])),
     };
   }
   if (name === "get_skill") {
@@ -636,14 +678,18 @@ class McpServer {
     const validId = id === null
       || typeof id === "string"
       || (typeof id === "number" && Number.isFinite(id));
-    if (request.jsonrpc !== "2.0" || typeof request.method !== "string") {
-      return hasId ? this.rpcError(id, -32600, "Invalid Request") : null;
-    }
     if (hasId && !validId) return this.rpcError(null, -32600, "Invalid Request");
+    if (request.jsonrpc !== "2.0" || typeof request.method !== "string") {
+      return this.rpcError(hasId ? id : null, -32600, "Invalid Request");
+    }
     if (request.method === "notifications/initialized") {
-      if (!hasId && this.initializeAccepted) this.initialized = true;
+      if (hasId) return this.rpcError(id, -32600, "Invalid Request");
+      if (this.initializeAccepted) this.initialized = true;
       return null;
     }
+    // A valid notification has no response, including unsupported methods and
+    // invalid parameters. Only the initialized notification changes session state.
+    if (!hasId) return null;
     if (request.method === "initialize") return this.initialize(request);
     if (!this.initialized) {
       return hasId ? this.rpcError(id, -32002, "Server not initialized") : null;
@@ -709,7 +755,7 @@ class McpServer {
       }
       let payload;
       if (name === "search_skills") {
-        assertExactKeys(args, ["query", "cursor", "limit"]);
+        assertExactKeys(args, ["query", "cursor", "limit", "matchMode", "requiredTerms", "categories", "tags"]);
         if (typeof args.query === "string" && [...args.query].length > 256) inputError("AAS_INPUT_QUERY_INVALID");
         payload = {
           ok: true,
@@ -721,6 +767,12 @@ class McpServer {
         assertExactKeys(args, ["id", "includeContent"]);
         if (args.includeContent !== undefined && typeof args.includeContent !== "boolean") inputError("AAS_MCP_INCLUDE_CONTENT_INVALID");
         payload = skillPayload(this.catalog, core.getSkill(this.catalog, args.id), this.root, args.includeContent === true);
+      } else if (name === "list_skill_files") {
+        assertExactKeys(args, ["id", "cursor", "limit"]);
+        payload = { ok: true, status: "complete", ...versionFields(this.catalog), ...listSkillFiles(this.catalog, args) };
+      } else if (name === "read_skill_file") {
+        assertExactKeys(args, ["id", "path"]);
+        payload = { ok: true, status: "complete", ...versionFields(this.catalog), ...readSkillFile(this.catalog, this.root, args) };
       } else if (name === "compose_stack") {
         assertExactKeys(args, ["name", "profile", "targets", "skillIds"]);
         payload = { ...versionFields(this.catalog), ...core.composeStack(this.catalog, args) };
